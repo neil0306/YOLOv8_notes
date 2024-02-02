@@ -130,13 +130,32 @@ YOLOv2相比于v1的改进:
 
 - 输出通道数255: 这个数字由 $3*(1+C+4)$ 计算而来; 3表示预测3个框; C在这里表示物体的具体类别, 由于训练使用的是**COCO数据集, 所以有80个类别**; 1 是confidence, 表示前景还是背景; 4则是框的坐标(Cx, Cy, H, W).
 
+## YOLO v4 -- Anchor Free
 
+![](notes_images/YOLOv4_网络结构.png)
+- SPP + PANet: SPP是空间金字塔池化, PANet是特征金字塔融合
+  - SPP: 用来解决输入图片尺寸不固定的问题, 通过金字塔池化, 将不同尺寸的特征图融合到一起 (使用不同大小的池化核来获得高宽不同但通道数相同的feature)
+    ![](notes_images/SPP模块图解.png)
+      - 参考博客: https://blog.csdn.net/weixin_38145317/article/details/106471322
+  - PANet: 用来解决多尺度特征融合的问题, 通过特征金字塔融合, 将不同尺度的特征图融合到一起
 
+    ```txt
+    在YOLOv3中, 进行特征融合的时候只有"从下到上"的特征融合, 但在YOLOv4中, 还进行了"从上到下"的特征融合, 这样可以更好地适应不同尺寸的物体.
+    ```
 
-
-
-
-
+- 模块:
+  ```txt
+  CBL: 
+    Convolution + Batch Normalization + Leaky ReLU
+  CBM: 
+    Convolution + Batch Normalization + Mish
+    Mish也是一种激活函数
+  ResUnit: 
+    用CBL和残差连接构建的模块, 和 YOLOv3 一样
+  CSPn: 
+    利用CBM, CBL 和 ResUnit构建的模块, 并加入了残差连接
+    n表示有n个CBM模块
+  ```
 
 
 
