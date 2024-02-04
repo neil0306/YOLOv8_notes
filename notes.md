@@ -37,6 +37,17 @@ Anchor base 的缺点:
 ![](notes_images/YOLO_v1-v7_演变时间线.png)
 
 
+```txt
+YOLO v1, v6, v8, YOLOX 都是 Anchor Free 的网络
+YOLO v2, v3, v4, v5, v7 都是 Anchor Base 的网络
+
+耦合头:
+  v1, v2, v3, v4, v5, v7 都是耦合头
+
+解耦头:
+  YOLOX, v6, v8 都是解耦头
+```
+
 ## YOLO v1 -- Anchor Free
 提出时间: 2015年.
 注意: **YOLO v1 是 Anchor Free 的网络**, 它把Anchor的预测当做`回归`问题来处理.
@@ -280,7 +291,7 @@ Head部分:
   采用 Anchor-free 范式，同时辅以 SimOTA 标签分配策略以及 SIoU 边界框回归损失来进一步提高检测精度。
 ```
 
-## YOLO v7
+## YOLO v7 -- Anchor Base
 提出时间: 2022年.
 
 结构图画法1:
@@ -361,7 +372,26 @@ Head部分:
 - HEAD
   - 用回耦合头.
 
+注: 原作者后续好像还给了一个 Anchor Free 版本.
 
+## YOLO v8 -- Anchor Free
+![](notes_images/YOLOv8_网络结构图.png)
+
+模块:
+- Backbone:
+  - P1~P5表示原图不同尺度的特征图, 用于不同尺度的物体检测. (P表示金字塔Pyramid)
+    - P5是原图的 1/32, P4是原图的 1/16, P3是原图的 1/8, P2是原图的 1/4, P1是原图的 1/2
+  - 图中 backbone 下方是金字塔的细节, 可以看到每一层的输出维度乘了一个 `w`, w是右侧不同大小的模型的宽度因子(Widen_factor), 用于控制模型的大小.
+- CSP layer:
+  - 使用了自己设计的结构(与v6, v7不一样)
+    - 由 普通卷积层 + DarknetBottleneck 组成
+      - DarknetBottleneck还有一个参数, true/false, 用于控制切换**有无残差的结构**.
+  - 在CSP layer中, 还能看到 Darknet Bottlenet 里也出现了 $ n = 6 * d$ 的参数, n 是这个 bottleneck 结构的数量, `d` 则是一个参数, 用于控制模型的深度因子(Depth_factor), 也是用于控制模型的大小.
+
+- HEAD:
+  - 解耦头
+    - 分成两个分支, 一个预测CLS(前景北京), 一个预测BBOX(位置+物体类别)
+    - CLS分支loss用 binary cross entropy loss; BBOX分支loss用 CIOU 和 DFL(Focal loss改进版本)
 
 
 
