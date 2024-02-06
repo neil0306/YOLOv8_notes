@@ -409,7 +409,7 @@ git submodule update --init --recursive
 ## 模型构建
 Ultralytics `构建模型`是在`配置文件`中进行指的(如果需要修改模型结构, 则可以通过直接修改配置文件来完成). 配置文件路径位于:
 ```txt
-./ultralytics/ultralytics/cfg/models/v8/yolov8.yaml
+ultralytics代码的路径/ultralytics/ultralytics/cfg/models/v8/yolov8.yaml
 ```
 - 配置文件中有对应的注释笔记
 
@@ -420,17 +420,270 @@ head 的细节:
   - CLS分支: 使用 binary cross entropy loss 作为loss
     - NC 表示: Number of Classes, 也就是类别的数量
 
-代码文件位于:
+head代码文件位于:
 ```txt
-./ultralytics/ultralytics/nn/modules/head.py
+ultralytics代码的路径/ultralytics/ultralytics/nn/modules/head.py
 ```
 
 
+## 用小麦检测数据集训练YOLO v8
+需要对下载的数据进预处理, 这里在tools里自定义了两个脚本文件`data_prepare.py`和`show_yolo_labels.py`
+
+data_prepare.py 代码
+```py
+# 用来处理"全球小麦检测"数据集
+
+import os
+import json
+import numpy as np
+from tqdm import tqdm
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+
+def get_bbox(row):
+    bboxes = []
+    list1 = row.bbox.replace("[", "").replace("]","").replace(",","")   ## 去掉逗号和方括号
+    for i in list1.split(" "):
+        bboxes.append(float(i))   ## 字符串转数字
+    return bboxes
+
+# Convert the bounding boxes in YOLO format.
+def get_yolo_format_bbox(img_w, img_h, bboxes):
+    yolo_boxes = []
+    x = bboxes[0]       ## 左上角坐标
+    y = bboxes[1]       ## 左上角坐标
+    w = bboxes[2] 
+    h = bboxes[3] 
+    
+    ## 中心坐标
+    xc = x + int(w/2) # xmin + width/2
+    yc = y + int(h/2) # ymin + height/2
+
+    ## 坐标点归一化: 高,宽 以及 中心点坐标值 都用对应的边长进行归一化
+    yolo_boxes=[1, xc/img_w, yc/img_h, w/img_w, h/img_h] # confidence, x_center y_center width height
+    yolo_boxes = str(yolo_boxes).replace("[", "").replace("]","").replace(",","")
+    return yolo_boxes
+
+def split_dataset(TRAIN_PATH):
+    #使用pandas读取csv文件，新建path列，保存图片路径
+    df = pd.read_csv(TRAIN_PATH.replace("train/","train.csv"))   ## 读取标签文件, 获得 ground truth bbox
+    df['path'] = df.apply(lambda row:TRAIN_PATH+row.image_id+'.jpg', axis=1)    ## csv中第一列记录的是图片的文件名(但没有扩展名), 这里补齐文件扩展名, 然后将扩展好的数据新增为一列, 叫做 'path'
+    print(df.head())
+    train_list, valid_list = train_test_split(df.image_id.unique(), test_size=0.2, random_state=1)  ## 用sklearn的train_test_split函数, 将数据集划分为训练集和验证集: 
+                                                                                                    ## 传入图片id(由于一张图有多个bbox, 所以需要去重, 用unique), 测试集占比20%, 随机种子为1
+                                                                                                    ## 得到的是两个列表, 分别是训练集和验证集的图片id
+    train_df = df.loc[df.image_id.isin(train_list)]             ## 根据行索引取出训练集的数据
+    valid_df = df.loc[df.image_id.isin(valid_list)]             ## 根据行索引取出验证集的数据
+
+    ## 利用 pandas 的 loc 函数, 新增一列, 叫做 'split', 用来标记这张图属于 train 还是 valid
+    train_df.loc[:, 'split'] = 'train'                          
+    valid_df.loc[:, 'split'] = 'valid'
+
+    df = pd.concat([train_df, valid_df]).reset_index(drop=True)  ## 拼接两个表格, 去掉重新排序索引
+    return df,train_df,valid_df
+
+def copy_train_test(TRAIN_PATH,TEST_PATH,WORK_ROOT):
+    import shutil
+    
+    ## ----------- 创建目录, 用于存放数据集图片 -----------
+    os.makedirs(WORK_ROOT+'dataset/images/train', exist_ok=True)
+    os.makedirs(WORK_ROOT+'dataset/images/valid', exist_ok=True)
+    os.makedirs(WORK_ROOT+'dataset/images/test', exist_ok=True)
+
+    os.makedirs(WORK_ROOT+'dataset/labels/train', exist_ok=True)
+    os.makedirs(WORK_ROOT+'dataset/labels/valid', exist_ok=True)
+    os.makedirs(WORK_ROOT+'dataset/labels/test', exist_ok=True)
+    ## -----------------------------------------------
+    
+    df,train_df,valid_df= split_dataset(TRAIN_PATH)
+    train_list = train_df.path.unique()  ## 用unique去重, 得到训练集的图片路径
+    valid_list = valid_df.path.unique()  ## 用unique去重, 得到验证集的图片路径
+    ## 复制图片到指定目录
+    for file in tqdm(train_list):
+        shutil.copy2(file,WORK_ROOT+'dataset/images/train') ## copy2 会复制文件和元数据
+    for file in tqdm(valid_list):
+        shutil.copy(file, WORK_ROOT+'dataset/images/valid') ## copy 单纯复制文件, 不复制元数据
+    
+    ## 处理测试集
+    src = TEST_PATH
+    trg = WORK_ROOT+'dataset/images/test'
+
+    files=os.listdir(src)
+    for fname in files:
+        shutil.copy2(os.path.join(src,fname), trg)
+        
+    return df
+
+def csv2yolo(df,WORK_ROOT):
+    # Prepare the txt files for bounding box    按行处理数据集, 生成yolo格式的标签文件
+    for i in tqdm(range(len(df))):
+        row = df.loc[i]
+        img_id = row.image_id
+        split = row.split
+        
+        if split=='train':
+            file_name = WORK_ROOT+'dataset/labels/train/{}.txt'.format(img_id)
+        else:
+            file_name = WORK_ROOT+'dataset/labels/valid/{}.txt'.format(img_id)
+            
+        bboxes = get_bbox(row)  ## 将字符串数据转换为数字, 得到当前行的bbox的坐标
+            
+        # Format for YOLOv5
+        yolo_bboxes = get_yolo_format_bbox(IMG_SIZE, IMG_SIZE, bboxes)   ## (confidence, cx, cy, w, h), 注意是bbox中心点坐标
+            
+        with open(file_name, 'a') as f:
+            f.write(yolo_bboxes)
+            f.write('\n')
+    print("+++Done!+++")
+
+if __name__ == '__main__':
+    ##  -------------- 以下路径需要修改为当前机器的 绝对路径, 注意不要漏掉最后的 "/"  ----------------
+    TRAIN_PATH = "/home/ning/Desktop/YOLOv8_notes/ultralytics/dataset/train/"
+    TEST_PATH = '/home/ning/Desktop/YOLOv8_notes/ultralytics/dataset/test/'
+    WORK_ROOT = "/home/ning/Desktop/YOLOv8_notes/ultralytics/"
+    ## -----------------------------------------------------------------
+
+    IMG_SIZE = 1024   ## 数据集图片大小
+
+    df = copy_train_test(TRAIN_PATH,TEST_PATH,WORK_ROOT)
+    csv2yolo(df,WORK_ROOT)
+```
+---
+show_yolo_labels.py 代码
+```py
+# 在对应图片上显示处理好的数据集标签
+import os
+import cv2
+
+## 返归一化BBox坐标
+def parse_yolo_labels(file_path,h,w):
+    with open(file_path) as f:
+        bbox = []
+        for i in f:
+            split_ = i.strip().split(" ")
+            box = split_[1:]
+            box[::2] = [w*float(i) for i in box[::2]]
+            box[1::2] = [h*float(i) for i in box[1::2]]
+            bbox.append(box)
+    return bbox
+
+def show_bbox(img,bbox,save_path):
+    for box_ in bbox:
+        x1 = int(box_[0] - box_[2]/2)
+        y1 = int(box_[1] - box_[3]/2)
+        x2 = int(box_[0] + box_[2]/2)
+        y2 = int(box_[1] + box_[3]/2)
+        cv2.rectangle(img,(x1,y1),(x2,y2),(0,0,255),2,1)
+    
+    cv2.imwrite(save_path,img)
+    # cv2.imshow('result',img)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+if __name__ == '__main__':
+    label_path = '/home/ning/Desktop/YOLOv8_notes/ultralytics/dataset/labels/train'
+    image_root = "/home/ning/Desktop/YOLOv8_notes/ultralytics/dataset/images/train"
+    
+    save_root = "/home/ning/Desktop/YOLOv8_notes/ultralytics/dataset/labels/show_labels"
+    os.makedirs(save_root, exist_ok=True)
+    
+    for file in os.listdir(label_path)[:]:
+        file_path = os.path.join(label_path,file)
+        img_path = os.path.join(image_root,file.replace('txt','jpg'))
+        img = cv2.imread(img_path)
+        h,w,r = img.shape
+        bbox = parse_yolo_labels(file_path,h,w)
+        save_path = os.path.join(save_root,file).replace('.txt','.jpg')
+        show_bbox(img,bbox,save_path)
+```
+
+---
+
+由于使用了自己的数据集, 所以还需要新增一个`dataset.yml`文件, 用来指定数据的位置等信息:
+```yml
+## 路径配置
+path: /home/ning/Desktop/YOLOv8_notes/ultralytics/dataset
+train: images/train
+val:  images/valid
+test: images/test
+
+## classes, 这里只有两类, 分别是小麦和背景
+    0: none
+    1: wheat
+```
+
+然后按照 README 的教程, 新增一个 训练脚本`train.py`:
+```py
+from ultralytics import YOLO
+
+# 加载模型
+model = YOLO("yolov8n.yaml")  # 从头开始构建新模型
+model = YOLO("yolov8n.pt")  # 加载预训练模型（建议用于训练）
+
+# 使用模型
+model.train(data="coco128.yaml", epochs=3)  # 训练模型
+metrics = model.val()  # 在验证集上评估模型性能
+results = model("https://ultralytics.com/images/bus.jpg")  # 对图像进行预测
+success = model.export(format="onnx")  # 将模型导出为 ONNX 格式
+
+```
 
 
+---
 
+训练之前, 需要检查当前训练策略的一些配置, 位于`default.yaml`中, 路径为:
+```txt
+ultralytics代码的路径/ultralytics/ultralytics/cfg/default.yaml
+```
+- 这里写的是 yolo v8 使用的一些超参数等, 下面是一些值得关注的参数
+```txt
+全局参数:
+  task: 指定当前yolo模型用来做什么, 比如 detect, segment, classify, pose
+  mode: train, val, predict, export, track, benchmark
 
+val/test setting里比较重要的有
+  iou
+  max_det: 设定检测的最大数量
 
+超参数部分:
+  lr0: 初始学习率
+  lrf: 终止学习率
+  hsv_h, hsv_s, hsv_v: 用来做数据增强的参数, 用来控制图片的色调, 饱和度, 亮度
+  degrees: 用来控制旋转的角度
+  translate: 用来控制平移的距离
+  scale: 用来控制缩放的比例
+  shear: 用来控制剪切的程度
+  perspective: 用来控制透视变换的程度
+  flipud, fliplr: 用来控制上下翻转和左右翻转的概率
+  mosaic: 用来控制是否使用mosaic数据增强
+  mixup: 用来控制是否使用mixup数据增强
+  copy_paste: 用来控制是否使用copy_paste数据增强
+```
 
+### 训练log
+执行训练或者检测的时候, 会在打开项目的根目录下生成一个`runs`文件夹, 里面会根据task的名称(如detect, val等) 生成文件夹, 如果是训练, 则会继续生成一个`train`文件夹用于存放着训练的log文件(多次跑train的话, 会生成 train1, train2, ... 文件夹).
+里面的内容通常包含:
+```txt
+weights:
+  保存val时最好的权重文件, 以及最后一次训练的权重文件
+  如果自己写的 train.py 里还指定了转换的权重(如onnx), 则还会生成一个 .onnx 文件
 
+args:
+  训练使用的超参数 (在 ultralytics/cfg/default.yaml 中进行定义)
+
+labels_correlogram:
+  一个图片, 用来展示训练集的标签分布情况
+
+labels.png:
+  一个图片, 用来展示训练集的标签分布情况
+
+results.txt:
+  训练log, 每个epoch记录一次, 里面包含了训练的一些指标, 如loss, mAP等
+
+train_batch: 
+  一共有3张, 图中会将标签画在输入图片上, 用来检查数据集的标签是否正确
+
+整个模型训练完成后, 还会多出几张统计图:
+  F1_curve.png, P_curve.png, R_curve.png 等等
+```
 
