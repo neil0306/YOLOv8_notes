@@ -394,5 +394,43 @@ Head部分:
     - CLS分支loss用 binary cross entropy loss; BBOX分支loss用 CIOU 和 DFL(Focal loss改进版本)
 
 
+### Loss Function
+DFL(Distribution Focal Loss) 的参考博客:
+- https://zhuanlan.zhihu.com/p/78743630
+- 
+
+# Ultralytics 的YOLO v8代码
+代码已用子模块的形式添加到本repo中, 初始化并更新子模块的命令如下:
+```sh
+git submodule update --init --recursive
+```
+
+
+## 模型构建
+Ultralytics `构建模型`是在`配置文件`中进行指的(如果需要修改模型结构, 则可以通过直接修改配置文件来完成). 配置文件路径位于:
+```txt
+./ultralytics/ultralytics/cfg/models/v8/yolov8.yaml
+```
+- 配置文件中有对应的注释笔记
+
+
+head 的细节:
+- head 分成了两个分支: 一个用于检测位置(预测BBox), 一个用于检测当前区域是否有物体(预测CLS)
+  - BBox分支: 使用 CIoU 和 DFL(Focal loss改进版本) 作为loss, 由于DFL需要参数 reg_max, 所以前面还有一层参数 reg_max
+  - CLS分支: 使用 binary cross entropy loss 作为loss
+    - NC 表示: Number of Classes, 也就是类别的数量
+
+代码文件位于:
+```txt
+./ultralytics/ultralytics/nn/modules/head.py
+```
+
+
+
+
+
+
+
+
 
 
