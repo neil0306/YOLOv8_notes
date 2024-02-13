@@ -397,7 +397,121 @@ Head部分:
 ### Loss Function
 DFL(Distribution Focal Loss) 的参考博客:
 - https://zhuanlan.zhihu.com/p/78743630
-- 
+
+一些基本概念 -- Anchor Free 的做法是直接回归出 BBox, 故需要明确一下:
+- 回归: 用大白话来描述就是`我给定一个ground truth, 你给我一个预测值, 我们要让这个预测值尽量接近ground truth`, 这个过程就叫做回归.
+  - 在训练的时候, 为了衡量预测值与ground truth的差距, 一般会计算一下`预测值与ground truth的距离`, 这个距离就叫做`loss`.
+  - 对于目标检测任务而言, 用来衡量距离的函数常见的是: `L1 loss, L2 loss, CIoU loss, DIoU loss, GIoU loss` 等等.
+
+目标检测损失函数分析:
+L1, L2 loss 与 IoU, GIoU 的对比:
+![](notes_images/L1_L2_IoU_GIoU_的对比.png)
+- 可以看到, 用IoU来计算两个框的距离, 会比L1, L2 loss更加合理
+- IoU具有`尺度不变性`
+  - IoU 的缺点:
+    - IoU 无法衡量`中心点的偏移(水平 or 任意角度偏移)`,  无法衡量`长宽比`, 无法衡量`旋转角度`
+      ![](notes_images/IoU缺点_相同IoU下的的不同框.png)
+
+- IoU的改进版 -- GIOU:
+  - ![](notes_images/GIOU的计算公式.png)
+    - 公式里 $C - (A \cup B ) \over C$ 的分子表示 **红色阴影部分的面积**, 而C则表示的是A, B两个框的最小外接矩形的面积; 
+      - 如果A和B两个框完全贴合时(**距离为0**), 分子的计算结果就是0, GIOU计算出来是1
+      - 如果A和B两个**框距离非常远**, 此时这部分公式的结果就是1, 而IoU也是0, 由于整体公式是 IoU 减去 这部分式子, 所以最终 GIOU 为 -1.
+        - 故 GIOU 的范围是 `[-1, 1]`, 并且 GIOU 有了`度量两个框距离多远(中心点水平偏移)`的能力.
+
+- IoU 的改进版 -- DIOU
+  - 它是在 GIOU 的基础上, 加入了`中心点的任意角度偏移`的衡量
+    ![](notes_images/DIOU的计算公式.png)
+    - 公式的d是两个框中心点的距离, c是AB两个框的对角线长度
+      - 两个框重叠时, $d = 0$, c是一个可以计算出来的常数, IoU 为 1, 此时 DIOU = 1
+      - 两个框离得远时, `d`无限接近于 `c`, IoU 为 0, 故 DIOU = -1
+      - 因此, DIOU 的范围是 `[-1, 1]`, 并且 DIOU 有了`度量两个框距离多远(中心点沿任意方向偏移)`的能力.
+
+- IOU 改进版 -- CIOU
+  - CIOU 可以衡量`中心点的偏移(水平 or 任意角度偏移)` 以及`长宽比`
+    ![](notes_images/CIOU的计算公式.png)
+      - 这里的长宽比是基于 `v` 来度量的, 即基于`两个框各自对角线夹角`的比较(用反正切求出角度), 由于检测框是一个长方形或者正方形, 所以对角线夹角一定位于 $[0, \pi/2]$ 范围内, 前面的系数 $4\over \pi ^2$ 是方便求导的时候抵消常数用的.
+      - 解释完 v, $\alpha$ 就是套一下公式罢了, 值得注意的就是`IOU越大, alpha 越小, 表示优先考虑高宽比`, `IOU越小, alpha 越大, 表示优先考虑框的距离`. 
+      - 然后 CIOU 的整体公式中, d 依旧表示两个框中心点的距离, c 则是AB两个框的对角线长度.
+
+实现代码:
+```py
+def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
+    """
+    Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
+
+    Args:
+        box1 (torch.Tensor): A tensor representing a single bounding box with shape (1, 4).
+        box2 (torch.Tensor): A tensor representing n bounding boxes with shape (n, 4).
+        xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
+                               (x1, y1, x2, y2) format. Defaults to True.
+        GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
+        DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
+        CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+
+    Returns:
+        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+    """
+
+    # Get the coordinates of bounding boxes
+    if xywh:  # transform from xywh to xyxy    ## 传入框是中心点坐标 + 高宽
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+        ## 计算两个框的半宽高
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2   
+
+        ## 计算两个框的左上角和右下角坐标
+        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
+        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
+    else:  # x1, y1, x2, y2 = box1           ## 传入框是左上角坐标 + 右下角坐标
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+        ## 计算宽高 (注意为了计算时防止除零, 对高度加了一个 epslon)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps    
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+
+    # Intersection area
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
+        b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
+    ).clamp_(0)
+
+    # Union Area
+    union = w1 * h1 + w2 * h2 - inter + eps   ## 为了防止除零, 加了 epslon
+
+    # IoU
+    iou = inter / union
+
+    if CIoU or DIoU or GIoU:
+        ## cw, ch 是最小外接矩形的宽和高, 这是 GIOU 要用的东西
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
+        
+        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            ## 用勾股定理计算对角线的平方, 注意防止除零, 加了 epslon
+            c2 = cw**2 + ch**2 + eps  # convex diagonal squared   
+            
+            ## 计算两个框中心点的距离: 使用了一个等价计算方式
+            rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
+
+            ## 两面两行可以直接算出 DIOU, CIOU需要基于 DIOU 进行进一步计算才能得到
+            if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                ## v 直接按照公式进行计算
+                v = (4 / math.pi**2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+
+                ## alpha 也是按照公式写一下
+                with torch.no_grad():
+                    alpha = v / (v - iou + (1 + eps))   ## 为了防止除零, 加上 epslon
+                
+                ## 组合 CIoU 的计算公式
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+
+            return iou - rho2 / c2  # DIoU
+        
+        # GIOU: 计算两个框的最小外接矩形的面积
+        c_area = cw * ch + eps  # convex area
+        return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    return iou  # IoU
+```
 
 # Ultralytics 的YOLO v8代码
 代码已用子模块的形式添加到本repo中, 初始化并更新子模块的命令如下:
@@ -413,6 +527,125 @@ ultralytics代码的路径/ultralytics/ultralytics/cfg/models/v8/yolov8.yaml
 ```
 - 配置文件中有对应的注释笔记
 
+在代码中, 读取配置文件并构建模型的代码位于:
+```txt
+ultralytics代码的路径/ultralytics/ultralytics/nn/tasks.py
+
+在tasks.py 的 DetectionModel 类的 __init__ 方法中, 有一行代码:
+  self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+```
+
+对于这个`parse_model`函数:
+```py
+def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)     ## yml 文件读取之后转成一个字典, 传入这里的 d 变量中
+    """Parse a YOLO model.yaml dictionary into a PyTorch model."""
+    import ast
+
+    # Args
+    max_channels = float("inf")
+    nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
+    if scales:
+        scale = d.get("scale")
+        if not scale:
+            scale = tuple(scales.keys())[0]
+            LOGGER.warning(f"WARNING ⚠️ no model scale passed. Assuming scale='{scale}'.")
+        depth, width, max_channels = scales[scale]
+
+    if act:
+        Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
+        if verbose:
+            LOGGER.info(f"{colorstr('activation:')} {act}")  # print
+
+    if verbose:
+        LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+
+    ch = [ch]   ## channel 转成一个列表
+    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+
+    ## 将 Backbone 和 head 的配置拼起来了, 因为这两个的配置书写格式都是 [from, repeats, module, args] 
+    for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
+        m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module   判断是否为 torch.nn, 如果是, 则可以当做模块叠起来
+        for j, a in enumerate(args):
+            if isinstance(a, str):
+                with contextlib.suppress(ValueError):
+                    args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
+
+        n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+        if m in (    ## 根据层的名字, 将参数进行配置 (如果要新增模块, 需要在这里新增一下模块对应的类的名字)
+            Classify,
+            Conv,
+            ConvTranspose,
+            GhostConv,
+            Bottleneck,
+            GhostBottleneck,
+            SPP,
+            SPPF,
+            DWConv,
+            Focus,
+            BottleneckCSP,
+            C1,
+            C2,
+            C2f,
+            C3,
+            C3TR,
+            C3Ghost,
+            nn.ConvTranspose2d,
+            DWConvTranspose2d,
+            C3x,
+            RepC3,
+        ):
+            c1, c2 = ch[f], args[0]
+            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+
+            args = [c1, c2, *args[1:]]
+            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3):
+                args.insert(2, n)  # number of repeats
+                n = 1
+        elif m is AIFI:
+            args = [ch[f], *args]
+        elif m in (HGStem, HGBlock):
+            c1, cm, c2 = ch[f], args[0], args[1]
+            args = [c1, cm, c2, *args[2:]]
+            if m is HGBlock:
+                args.insert(4, n)  # number of repeats
+                n = 1
+        elif m is ResNetLayer:
+            c2 = args[1] if args[3] else args[1] * 4
+        elif m is nn.BatchNorm2d:
+            args = [ch[f]]
+        elif m is Concat:
+            c2 = sum(ch[x] for x in f)
+        elif m in (Detect, Segment, Pose, OBB):
+            args.append([ch[x] for x in f])
+            if m is Segment:
+                args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+            args.insert(1, [ch[x] for x in f])
+        else:
+            c2 = ch[f]
+
+        ## 搭建网络: 将模型组合起来, 用 nn.Sequntial 包起来, 这里根据 repeat 字段的值 n 写了循环
+        m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
+        t = str(m)[8:-2].replace("__main__.", "")  # module type
+        m.np = sum(x.numel() for x in m_.parameters())  # number params
+        m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
+        if verbose:
+            LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{m.np:10.0f}  {t:<45}{str(args):<30}")  # print
+        save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+        layers.append(m_)
+        if i == 0:
+            ch = []
+        ch.append(c2)
+    return nn.Sequential(*layers), sorted(save)
+
+```
+
+
+
+
+----
 
 head 的细节:
 - head 分成了两个分支: 一个用于检测位置(预测BBox), 一个用于检测当前区域是否有物体(预测CLS)
